@@ -1,0 +1,1441 @@
+#!/usr/bin/env python3
+"""
+Sheikh - Bangla Dataset CLI Tool
+
+A production-grade CLI for managing Bengali language datasets with
+asynchronous, worker-based scraping capabilities and link-hub discovery.
+
+Usage:
+    sheikh scrape <domain> <max_urls>    # Scrape a domain
+    sheikh scrape <hub_url> <max_urls> --mode hub  # Scrape from hub page
+    sheikh syntax <file>                 # Validate dataset schema
+    sheikh stats <file>                  # Compute quality/length stats
+    sheikh split <file> <ratio>          # Train/val split
+    sheikh push <file>                   # Push to Hugging Face
+
+Examples:
+    sheikh scrape allbanglachoti.com 1000
+    sheikh scrape https://sites.google.com/view/allbanglachoti/bangla-choti 1000 --mode hub
+    sheikh syntax data/train.jsonl
+    sheikh stats data/train.jsonl
+    sheikh split data/train.jsonl 0.8
+    sheikh push data/train.jsonl
+
+Author: MiniMax Agent
+License: MIT
+Python: >= 3.9
+"""
+
+import argparse
+import asyncio
+import csv
+import hashlib
+import json
+import logging
+import os
+import re
+import statistics
+import sys
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple, Any
+from urllib.parse import urljoin, urlparse
+import aiohttp
+import aiofiles
+from bs4 import BeautifulSoup
+from tqdm import tqdm
+from colorama import init, Fore, Back, Style
+import warnings
+
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
+VERSION = "2.1.0"
+DEFAULT_OUTPUT_DIR = Path("data/raw")
+DEFAULT_DATA_DIR = Path("data")
+LOG_DIR = Path("logs")
+RESUME_FILE = Path("data/.scrape_resume.json")
+
+# Initialize colorama for colored output
+init(autoreset=True)
+
+BANGLA_RANGE = re.compile(r"[\u0980-\u09FF]")
+HEADERS = {
+    "User-Agent": "BanglaDatasetBot/2.1 (research dataset; asynchronous)",
+    "Accept-Language": "bn,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+# Async configuration
+DEFAULT_CONCURRENT_WORKERS = 10
+DEFAULT_RATE_LIMIT = 0.5  # seconds between requests per worker
+MAX_RETRIES = 3
+BACKOFF_FACTOR = 1.5
+
+
+# --------------------------------------------------
+# COLORED OUTPUT HELPERS
+# --------------------------------------------------
+class ColoredOutput:
+    """Helper class for colored terminal output using colorama."""
+    
+    @staticmethod
+    def info(msg: str) -> str:
+        """Blue info message."""
+        return f"{Fore.BLUE}[INFO]{Style.RESET_ALL} {msg}"
+    
+    @staticmethod
+    def success(msg: str) -> str:
+        """Green success message."""
+        return f"{Fore.GREEN}[OK]{Style.RESET_ALL} {msg}"
+    
+    @staticmethod
+    def warning(msg: str) -> str:
+        """Yellow warning message."""
+        return f"{Fore.YELLOW}[WARN]{Style.RESET_ALL} {msg}"
+    
+    @staticmethod
+    def error(msg: str) -> str:
+        """Red error message."""
+        return f"{Fore.RED}[ERROR]{Style.RESET_ALL} {msg}"
+    
+    @staticmethod
+    def progress(msg: str) -> str:
+        """Cyan progress message."""
+        return f"{Fore.CYAN}[PROG]{Style.RESET_ALL} {msg}"
+    
+    @staticmethod
+    def highlight(msg: str) -> str:
+        """Magenta highlighted message."""
+        return f"{Fore.MAGENTA}{Style.BRIGHT}{msg}{Style.RESET_ALL}"
+    
+    @staticmethod
+    def dim(msg: str) -> str:
+        """Dim/dimmed message."""
+        return f"{Style.DIM}{msg}{Style.RESET_ALL}"
+
+
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
+def setup_logging(name: str = "sheikh") -> logging.Logger:
+    """Configure logging for production use."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    
+    log_file = LOG_DIR / f"sheikh_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    return logging.getLogger(name)
+
+
+# --------------------------------------------------
+# DATA CLASSES
+# --------------------------------------------------
+@dataclass
+class ScrapeStats:
+    """Statistics for scraping operation."""
+    accepted: int = 0
+    duplicates: int = 0
+    rejected: Dict[str, int] = field(default_factory=lambda: {
+        "empty": 0, "html": 0, "short": 0, "non_bangla": 0, "error": 0, "rate_limited": 0
+    })
+    total_words: int = 0
+    total_chars: int = 0
+    urls_discovered: int = 0
+    start_time: datetime = None
+    end_time: datetime = None
+    
+    @property
+    def duration(self) -> float:
+        if self.start_time and self.end_time:
+            return (self.end_time - self.start_time).total_seconds()
+        return 0.0
+
+
+@dataclass
+class StoryData:
+    """Container for scraped story data."""
+    url: str
+    title: str
+    content: str
+    word_count: int
+    char_count: int
+    content_hash: str
+
+
+# --------------------------------------------------
+# HUB DISCOVERY (ASYNC)
+# --------------------------------------------------
+async def async_discover_urls_from_hub(
+    hub_url: str,
+    allow_domains: Optional[Set[str]] = None,
+    session: Optional[aiohttp.ClientSession] = None
+) -> List[str]:
+    """
+    Discover story URLs from a hub page (e.g., Google Sites, index pages).
+    Extracts all outbound links and optionally filters by allowed domains.
+    
+    Args:
+        hub_url: URL of the hub page to scrape
+        allow_domains: Set of allowed domains to filter links (e.g., {"www.allbanglachoti.com"})
+        session: Optional aiohttp session for connection reuse
+    
+    Returns:
+        List of discovered URLs matching the criteria
+    """
+    discovered_links = set()
+    should_close_session = False
+    
+    if session is None:
+        connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+        timeout = aiohttp.ClientTimeout(total=30)
+        session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers=HEADERS
+        )
+        should_close_session = True
+    
+    try:
+        logging.info(f"Fetching hub page: {hub_url}")
+        
+        async with session.get(hub_url) as response:
+            if response.status != 200:
+                logging.warning(f"Failed to fetch hub page: {hub_url} (status: {response.status})")
+                return []
+            
+            html = await response.text()
+            soup = BeautifulSoup(html, "lxml")
+            
+            # Extract all links from anchor tags
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+                
+                # Skip empty links, anchors, and non-http(s) links
+                if not href or href.startswith("#") or href.startswith("javascript:"):
+                    continue
+                
+                # Make relative URLs absolute
+                if not href.startswith("http"):
+                    href = urljoin(hub_url, href)
+                
+                # Parse and validate URL
+                try:
+                    parsed = urlparse(href)
+                    if not parsed.netloc:
+                        continue
+                except Exception:
+                    continue
+                
+                # Filter by allowed domains if specified
+                if allow_domains:
+                    if parsed.netloc not in allow_domains:
+                        continue
+                
+                discovered_links.add(href)
+            
+            # Remove the hub URL itself if present
+            hub_parsed = urlparse(hub_url)
+            discovered_links = {link for link in discovered_links 
+                               if urlparse(link).netloc != hub_parsed.netloc or 
+                                  urlparse(link).path != hub_parsed.path}
+            
+            logging.info(f"Discovered {len(discovered_links)} links from hub page")
+            
+    except asyncio.TimeoutError:
+        logging.error(f"Timeout fetching hub page: {hub_url}")
+    except aiohttp.ClientError as e:
+        logging.error(f"Client error fetching hub page {hub_url}: {e}")
+    except Exception as e:
+        logging.error(f"Error discovering links from hub {hub_url}: {e}")
+    
+    finally:
+        if should_close_session:
+            await session.close()
+    
+    return sorted(discovered_links)
+
+
+# --------------------------------------------------
+# HUB DISCOVERY SYNC WRAPPER
+# --------------------------------------------------
+def discover_urls_from_hub_sync(
+    hub_url: str,
+    allow_domains: Optional[Set[str]] = None
+) -> List[str]:
+    """
+    Synchronous wrapper for hub discovery (for CLI compatibility).
+    """
+    import requests
+    
+    discovered_links = set()
+    
+    try:
+        logging.info(f"[SYNC] Fetching hub page: {hub_url}")
+        
+        response = requests.get(hub_url, timeout=30, headers=HEADERS)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "lxml")
+        
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            
+            if not href or href.startswith("#") or href.startswith("javascript:"):
+                continue
+            
+            if not href.startswith("http"):
+                href = urljoin(hub_url, href)
+            
+            try:
+                parsed = urlparse(href)
+                if not parsed.netloc:
+                    continue
+            except Exception:
+                continue
+            
+            if allow_domains and parsed.netloc not in allow_domains:
+                continue
+            
+            discovered_links.add(href)
+        
+        logging.info(f"[SYNC] Discovered {len(discovered_links)} links from hub page")
+        
+    except Exception as e:
+        logging.error(f"[SYNC] Error discovering links from hub {hub_url}: {e}")
+    
+    return sorted(discovered_links)
+
+
+# --------------------------------------------------
+# SITEMAP DISCOVERY (ASYNC)
+# --------------------------------------------------
+async def async_discover_urls_from_sitemap(
+    base_url: str, 
+    max_urls: int = 1000,
+    session: Optional[aiohttp.ClientSession] = None
+) -> List[str]:
+    """
+    Discover story URLs from sitemap_index.xml (handles nested sitemaps).
+    Uses async HTTP for faster discovery.
+    """
+    all_urls = []
+    should_close_session = False
+    
+    if session is None:
+        connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+        timeout = aiohttp.ClientTimeout(total=30)
+        session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers=HEADERS
+        )
+        should_close_session = True
+    
+    try:
+        sitemap_index_url = f"{base_url}/sitemap_index.xml"
+        
+        async with session.get(sitemap_index_url) as response:
+            if response.status != 200:
+                logging.warning(f"Sitemap not found at {sitemap_index_url}")
+                return []
+            
+            text = await response.text()
+            
+            try:
+                root = ET.fromstring(text)
+            except ET.ParseError as e:
+                logging.error(f"Failed to parse sitemap index: {e}")
+                return []
+            
+            child_sitemaps = []
+            for loc in root.iter():
+                if loc.tag.endswith('loc'):
+                    url = loc.text.strip()
+                    if '/post-sitemap' in url or '/story-sitemap' in url:
+                        child_sitemaps.append(url)
+            
+            logging.info(f"Found {len(child_sitemaps)} child sitemaps")
+            
+            # Fetch child sitemaps concurrently
+            semaphore = asyncio.Semaphore(5)
+            
+            async def fetch_child_sitemap(sm_url: str) -> List[str]:
+                async with semaphore:
+                    try:
+                        async with session.get(sm_url) as sm_response:
+                            if sm_response.status == 200:
+                                sm_text = await sm_response.text()
+                                sm_root = ET.fromstring(sm_text)
+                                urls = []
+                                for loc in sm_root.iter():
+                                    if loc.tag.endswith('loc'):
+                                        url = loc.text.strip()
+                                        # Match story URLs (numeric patterns)
+                                        if re.search(r'/\d+/$', url) and '/category/' not in url and '/tag/' not in url:
+                                            urls.append(url)
+                                return urls
+                    except Exception as e:
+                        logging.warning(f"Failed to fetch {sm_url}: {e}")
+                    return []
+            
+            # Process all child sitemaps
+            tasks = [fetch_child_sitemap(url) for url in child_sitemaps]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, list):
+                    all_urls.extend(result)
+            
+            # Limit to max_urls
+            all_urls = all_urls[:max_urls]
+            logging.info(f"Discovered {len(all_urls)} story URLs")
+            
+    finally:
+        if should_close_session:
+            await session.close()
+    
+    return all_urls
+
+
+# --------------------------------------------------
+# RATE LIMITER
+# --------------------------------------------------
+class AsyncRateLimiter:
+    """Asynchronous rate limiter using token bucket algorithm."""
+    
+    def __init__(self, rate: float = 1.0, capacity: int = 10):
+        self.rate = rate  # tokens per second
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = time.monotonic()
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.last_update
+            self.last_update = now
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return
+            
+            # Wait for token refill
+            wait_time = (1 - self.tokens) / self.rate
+            self.tokens = 0
+            await asyncio.sleep(wait_time)
+
+
+# --------------------------------------------------
+# RETRY WITH BACKOFF
+# --------------------------------------------------
+async def fetch_with_retry(
+    session: aiohttp.ClientSession,
+    url: str,
+    rate_limiter: Optional[AsyncRateLimiter] = None,
+    max_retries: int = MAX_RETRIES
+) -> Optional[aiohttp.ClientResponse]:
+    """
+    Fetch a URL with exponential backoff retry logic.
+    """
+    if rate_limiter:
+        await rate_limiter.acquire()
+    
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return response
+                elif response.status == 429:  # Rate limited
+                    wait_time = BACKOFF_FACTOR ** attempt * 2
+                    logging.warning(f"Rate limited, waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                    last_exception = Exception(f"Rate limited (429)")
+                else:
+                    # Don't retry on client errors
+                    return None
+                    
+        except asyncio.TimeoutError:
+            last_exception = asyncio.TimeoutError(f"Timeout on attempt {attempt + 1}")
+            wait_time = BACKOFF_FACTOR ** attempt
+            await asyncio.sleep(wait_time)
+        except aiohttp.ClientError as e:
+            last_exception = e
+            wait_time = BACKOFF_FACTOR ** attempt
+            await asyncio.sleep(wait_time)
+    
+    if last_exception:
+        logging.error(f"Failed to fetch {url} after {max_retries} attempts: {last_exception}")
+    
+    return None
+
+
+# --------------------------------------------------
+# STORY EXTRACTION
+# --------------------------------------------------
+def extract_story(html: str) -> Tuple[str, str]:
+    """Extract title and story content from HTML."""
+    soup = BeautifulSoup(html, "lxml")
+    
+    # Remove script and style elements
+    for script in soup(["script", "style", "nav", "header", "footer"]):
+        script.decompose()
+    
+    title_tag = soup.find("h1")
+    if title_tag:
+        title = title_tag.get_text(strip=True)
+    else:
+        title = soup.title.string if soup.title else "No Title"
+        title = re.sub(r'\s*[-|]\s*(All\s*Bangla\s*Choti|গল্প|চটি).*$', '', title, flags=re.IGNORECASE)
+        title = title.strip()
+    
+    paragraphs = soup.find_all("p")
+    content_lines = []
+    
+    for p in paragraphs:
+        text = p.get_text(strip=True)
+        if not text:
+            continue
+        if len(text) < 30:
+            continue
+        if not BANGLA_RANGE.search(text):
+            continue
+        content_lines.append(text)
+    
+    content = "\n".join(content_lines)
+    return title, content
+
+
+# --------------------------------------------------
+# CONTENT DEDUPLICATION (MINHASH SIMULATION)
+# --------------------------------------------------
+def compute_content_hash(content: str) -> str:
+    """
+    Compute a robust hash for content deduplication.
+    Uses normalized content to catch near-duplicates.
+    """
+    # Normalize whitespace
+    normalized = re.sub(r'\s+', ' ', content.strip())
+    # Create hash
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+
+# --------------------------------------------------
+# ASYNC SCRAPING WORKER
+# --------------------------------------------------
+async def scrape_worker(
+    worker_id: int,
+    url_queue: asyncio.Queue,
+    output_queue: asyncio.Queue,
+    session: aiohttp.ClientSession,
+    rate_limiter: AsyncRateLimiter,
+    seen_hashes: Set[str],
+    stats: ScrapeStats,
+    logger: logging.Logger,
+    pbar: tqdm
+) -> None:
+    """
+    Worker coroutine that scrapes URLs from the queue.
+    """
+    while True:
+        try:
+            url_data = await url_queue.get()
+            if url_data is None:  # Poison pill
+                url_queue.put(None)
+                break
+            
+            idx, url = url_data
+            
+            try:
+                response = await fetch_with_retry(session, url, rate_limiter)
+                
+                if response is None:
+                    stats.rejected["error"] += 1
+                    pbar.update(1)
+                    continue
+                
+                html = await response.text()
+                title, content = extract_story(html)
+                
+                word_count = len(content.split()) if content else 0
+                char_count = len(content)
+                content_hash = compute_content_hash(content)
+                
+                # Validation gates
+                if not content:
+                    logger.debug(f"[Worker {worker_id}] Rejected (empty): {url}")
+                    stats.rejected["empty"] += 1
+                
+                elif "<" in content or ">" in content:
+                    logger.debug(f"[Worker {worker_id}] Rejected (HTML remnants): {url}")
+                    stats.rejected["html"] += 1
+                
+                elif word_count < 50:
+                    logger.debug(f"[Worker {worker_id}] Rejected (too short): {url}")
+                    stats.rejected["short"] += 1
+                
+                elif not BANGLA_RANGE.search(content):
+                    logger.debug(f"[Worker {worker_id}] Rejected (non-Bangla): {url}")
+                    stats.rejected["non_bangla"] += 1
+                
+                elif content_hash in seen_hashes:
+                    logger.debug(f"[Worker {worker_id}] Rejected (duplicate): {url}")
+                    stats.duplicates += 1
+                
+                else:
+                    seen_hashes.add(content_hash)
+                    story = StoryData(
+                        url=url,
+                        title=title,
+                        content=content,
+                        word_count=word_count,
+                        char_count=char_count,
+                        content_hash=content_hash[:16]
+                    )
+                    await output_queue.put((idx, story))
+                    stats.accepted += 1
+                    stats.total_words += word_count
+                    stats.total_chars += char_count
+                    logger.info(f"[Worker {worker_id}] Accepted: {url[:60]}...")
+                
+            except Exception as e:
+                logger.error(f"[Worker {worker_id}] Error processing {url}: {e}")
+                stats.rejected["error"] += 1
+            
+            pbar.update(1)
+            url_queue.task_done()
+            
+        except asyncio.CancelledError:
+            break
+
+
+# --------------------------------------------------
+# ASYNC FILE WRITER
+# --------------------------------------------------
+async def file_writer(
+    output_path: Path,
+    output_queue: asyncio.Queue,
+    total_items: int,
+    logger: logging.Logger
+) -> None:
+    """
+    Background writer that flushes data to disk.
+    """
+    seen_ids = set()
+    
+    async with aiofiles.open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        await writer.writerow(["id", "url", "title", "content", "word_count", "content_hash"])
+        
+        completed = 0
+        pbar = tqdm(total=total_items, desc="Writing to disk", unit="stories")
+        
+        while completed < total_items:
+            try:
+                item = await asyncio.wait_for(output_queue.get(), timeout=5.0)
+                idx, story = item
+                
+                # Avoid duplicate writes
+                if idx not in seen_ids:
+                    story_id = f"story_{idx:06d}"
+                    await writer.writerow([story_id, story.url, story.title, story.content, 
+                                          story.word_count, story.content_hash])
+                    seen_ids.add(idx)
+                    completed += 1
+                
+                output_queue.task_done()
+                pbar.update(1)
+                
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+        
+        pbar.close()
+        logger.info(f"Writer completed: {completed} stories written")
+
+
+# --------------------------------------------------
+# RESUME FUNCTIONALITY
+# --------------------------------------------------
+def get_resume_state(domain: str) -> Dict[str, Any]:
+    """Load resume state from file."""
+    if RESUME_FILE.exists():
+        try:
+            with open(RESUME_FILE, 'r', encoding='utf-8') as f:
+                states = json.load(f)
+                return states.get(domain, {})
+        except Exception:
+            pass
+    return {}
+
+
+def save_resume_state(domain: str, state: Dict[str, Any]) -> None:
+    """Save resume state to file."""
+    states = {}
+    if RESUME_FILE.exists():
+        try:
+            with open(RESUME_FILE, 'r', encoding='utf-8') as f:
+                states = json.load(f)
+        except Exception:
+            pass
+    
+    states[domain] = state
+    RESUME_FILE.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(RESUME_FILE, 'w', encoding='utf-8') as f:
+        json.dump(states, f, indent=2, ensure_ascii=False)
+
+
+# --------------------------------------------------
+# ROBOTS.TXT COMPLIANCE
+# --------------------------------------------------
+async def check_robots_txt(base_url: str, session: aiohttp.ClientSession) -> bool:
+    """
+    Check if the site allows crawling via robots.txt.
+    Returns True if allowed, False otherwise.
+    """
+    parsed = urlparse(base_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    
+    try:
+        async with session.get(robots_url) as response:
+            if response.status != 200:
+                return True  # No robots.txt, assume allowed
+            
+            text = await response.text()
+            
+            # Simple robots.txt parser
+            user_agent = HEADERS["User-Agent"]
+            is_allowed = True
+            
+            lines = text.split('\n')
+            current_agent = None
+            for line in lines:
+                line = line.strip().lower()
+                if line.startswith('user-agent:'):
+                    current_agent = line.split(':')[1].strip()
+                    if current_agent == '*' or current_agent in user_agent.lower():
+                        is_allowed = True
+                    else:
+                        is_allowed = None
+                elif line.startswith('disallow:') and current_agent in (user_agent.lower(), '*'):
+                    path = line.split(':')[1].strip()
+                    if path and base_url.endswith(path):
+                        is_allowed = False
+            
+            return is_allowed if is_allowed is not None else True
+            
+    except Exception:
+        return True  # If we can't check, assume allowed
+
+
+# --------------------------------------------------
+# COMMAND: SCRAPE (ASYNC)
+# --------------------------------------------------
+async def async_cmd_scrape(
+    target: str,
+    max_urls: int = 100,
+    output_file: Optional[str] = None,
+    workers: int = DEFAULT_CONCURRENT_WORKERS,
+    rate: float = DEFAULT_RATE_LIMIT,
+    resume: bool = False,
+    check_robots: bool = True,
+    mode: str = "domain",
+    allow_domains: Optional[List[str]] = None
+) -> int:
+    """
+    Scrape stories from a domain or hub page using async worker-based architecture.
+    
+    Args:
+        target: Domain or hub URL to scrape
+        max_urls: Maximum number of URLs to discover and scrape
+        output_file: Optional custom output file path
+        workers: Number of concurrent workers
+        rate: Seconds between requests per worker (rate limiting)
+        resume: Whether to resume from previous session
+        check_robots: Whether to check robots.txt compliance
+        mode: Discovery mode - "domain" (sitemap) or "hub" (link extraction)
+        allow_domains: List of allowed domains for hub mode filtering
+    
+    Usage: 
+        sheikh scrape <domain> [max_urls] [--output FILE] [--workers N] [--rate R]
+        sheikh scrape <hub_url> [max_urls] --mode hub [--allow-domains domain1,domain2]
+    """
+    logger = setup_logging("sheikh.scrape")
+    
+    # Print colored banner
+    print(ColoredOutput.highlight(f"\n{'=' * 70}"))
+    print(ColoredOutput.highlight(f"Sheikh Async Scraper v{VERSION}"))
+    print(ColoredOutput.highlight(f"{'=' * 70}\n"))
+    
+    # Determine base URL and mode
+    if mode == "hub":
+        base_url = target if target.startswith(('http://', 'https://')) else f"https://{target}"
+        target_type = "hub"
+        target_display = target
+    else:
+        base_url = target if target.startswith(('http://', 'https://')) else f"https://{target}"
+        target_type = "domain"
+        target_display = urlparse(base_url).netloc
+    
+    print(ColoredOutput.info(f"Target type: {target_type}"))
+    print(ColoredOutput.info(f"Target: {target_display}"))
+    print(ColoredOutput.info(f"Max URLs: {max_urls}"))
+    print(ColoredOutput.info(f"Workers: {workers}, Rate limit: {rate}s/request\n"))
+    
+    if output_file:
+        output_path = Path(output_file)
+    else:
+        safe_name = target.replace('.', '_').replace('/', '_')
+        output_path = DEFAULT_OUTPUT_DIR / f"{safe_name}.csv"
+    
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Resume check
+    resume_state = {}
+    if resume:
+        resume_state = get_resume_state(target)
+        if resume_state:
+            logger.info(f"Resuming from previous state: {len(resume_state.get('completed', []))} completed")
+    
+    # Setup async session
+    connector = aiohttp.TCPConnector(limit=workers * 2, limit_per_host=workers)
+    timeout = aiohttp.ClientTimeout(total=30, connect=10)
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        headers=HEADERS
+    )
+    
+    try:
+        # Discover URLs based on mode
+        print(ColoredOutput.progress(f"Discovering URLs from {target_type}..."))
+        
+        if mode == "hub":
+            # Hub mode: extract links from hub page
+            allowed_domains_set = set(allow_domains) if allow_domains else None
+            urls = await async_discover_urls_from_hub(base_url, allowed_domains_set, session)
+        else:
+            # Domain mode: discover from sitemap
+            urls = await async_discover_urls_from_sitemap(base_url, max_urls, session)
+        
+        if not urls:
+            print(ColoredOutput.error("No URLs discovered. Exiting."))
+            return 1
+        
+        print(ColoredOutput.success(f"Discovered {len(urls)} URLs"))
+        
+        # Filter already completed URLs (resume)
+        completed_urls = set(resume_state.get('completed', []))
+        urls_to_scrape = [url for url in urls if url not in completed_urls]
+        
+        if not urls_to_scrape:
+            print(ColoredOutput.success("All URLs already scraped (resume complete)"))
+            return 0
+        
+        print(ColoredOutput.info(f"URLs to scrape: {len(urls_to_scrape)} (skipped {len(completed_urls)} completed)"))
+        
+        # Initialize stats and shared state
+        stats = ScrapeStats()
+        stats.start_time = datetime.now()
+        stats.urls_discovered = len(urls)
+        
+        seen_content_hashes = set(resume_state.get('hashes', []))
+        
+        # Setup queues
+        url_queue: asyncio.Queue = asyncio.Queue()
+        output_queue: asyncio.Queue = asyncio.Queue()
+        
+        # Add URLs to queue
+        for idx, url in enumerate(urls_to_scrape, start=len(completed_urls) + 1):
+            await url_queue.put((idx, url))
+        
+        # Setup rate limiter
+        rate_limiter = AsyncRateLimiter(rate=rate, capacity=workers)
+        
+        # Create workers with colored progress
+        pbar = tqdm(total=len(urls_to_scrape), desc="Scraping", unit="pages", 
+                   bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}]")
+        
+        worker_tasks = [
+            asyncio.create_task(
+                scrape_worker(
+                    i + 1, url_queue, output_queue, session,
+                    rate_limiter, seen_content_hashes, stats, logger, pbar
+                )
+            )
+            for i in range(workers)
+        ]
+        
+        # Start writer
+        writer_task = asyncio.create_task(
+            file_writer(output_path, output_queue, len(urls_to_scrape), logger)
+        )
+        
+        # Wait for all scraping to complete
+        await url_queue.join()
+        
+        # Stop workers (send poison pills)
+        for _ in range(workers):
+            await url_queue.put(None)
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+        
+        # Wait for writer to finish
+        await output_queue.join()
+        writer_task.cancel()
+        
+        try:
+            await writer_task
+        except asyncio.CancelledError:
+            pass
+        
+        pbar.close()
+        
+        stats.end_time = datetime.now()
+        
+        # Save resume state
+        if resume:
+            save_resume_state(target, {
+                "completed": list(completed_urls) + [url for _, url in urls_to_scrape],
+                "hashes": list(seen_content_hashes),
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        # Colored summary
+        print(f"\n{ColoredOutput.highlight('=' * 70)}")
+        print(ColoredOutput.highlight("SCRAPING SUMMARY"))
+        print(f"{ColoredOutput.highlight('=' * 70)}")
+        print(f"{ColoredOutput.info(f'Duration:')}{' ' * 15}{stats.duration:.2f} seconds")
+        print(f"{ColoredOutput.info(f'URLs discovered:')}{' ' * 10}{stats.urls_discovered}")
+        print(f"{ColoredOutput.success(f'Stories accepted:')}{' ' * 11}{stats.accepted}")
+        if stats.duplicates > 0:
+            print(f"{ColoredOutput.warning(f'Duplicates removed:')}{' ' * 8}{stats.duplicates}")
+        rejected_count = sum(stats.rejected.values())
+        if rejected_count > 0:
+            print(f"{ColoredOutput.warning(f'Rejected:')}{' ' * 18}{rejected_count}")
+        if stats.accepted > 0:
+            print(f"{ColoredOutput.info(f'Total words:')}{' ' * 16}{stats.total_words:,}")
+            print(f"{ColoredOutput.info(f'Avg words/story:')}{' ' * 13}{stats.total_words / stats.accepted:.1f}")
+            print(f"{ColoredOutput.info(f'Throughput:')}{' ' * 16}{stats.accepted / stats.duration:.1f} stories/sec")
+        print(f"{ColoredOutput.info(f'Output file:')}{' ' * 16}{output_path}")
+        print(f"{ColoredOutput.highlight('=' * 70)}\n")
+        
+        # Save stats
+        stats_file = DEFAULT_OUTPUT_DIR / "scraping_stats.json"
+        with open(stats_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": VERSION,
+                "duration_seconds": stats.duration,
+                "urls_discovered": stats.urls_discovered,
+                "stories_accepted": stats.accepted,
+                "duplicates_removed": stats.duplicates,
+                "rejected": stats.rejected,
+                "total_words": stats.total_words,
+                "avg_words_per_story": stats.total_words / stats.accepted if stats.accepted > 0 else 0,
+                "output_file": str(output_path),
+                "mode": mode,
+                "target": target
+            }, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Statistics saved to: {stats_file}")
+        
+    finally:
+        await session.close()
+    
+    return 0
+
+
+def cmd_scrape(target: str, max_urls: int = 100, output_file: Optional[str] = None,
+               workers: int = DEFAULT_CONCURRENT_WORKERS, rate: float = DEFAULT_RATE_LIMIT,
+               resume: bool = False, check_robots: bool = True,
+               mode: str = "domain", allow_domains: Optional[List[str]] = None) -> int:
+    """Synchronous wrapper for async scrape command."""
+    return asyncio.run(async_cmd_scrape(
+        target, max_urls, output_file, workers, rate, resume, check_robots, mode, allow_domains
+    ))
+
+
+# --------------------------------------------------
+# COMMAND: SYNTAX
+# --------------------------------------------------
+def cmd_syntax(file_path: str):
+    """
+    Validate dataset syntax and schema.
+    
+    Usage: sheikh syntax <file>
+    """
+    logger = setup_logging("sheikh.syntax")
+    
+    path = Path(file_path)
+    if not path.exists():
+        logger.error(f"File not found: {path}")
+        return 1
+    
+    logger.info(f"Validating: {path}")
+    
+    errors = []
+    warnings = []
+    samples_checked = 0
+    
+    if path.suffix == '.jsonl':
+        with open(path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f, 1):
+                try:
+                    obj = json.loads(line)
+                    samples_checked += 1
+                    
+                    # Check required fields
+                    required_fields = ['instruction', 'output', 'id']
+                    for field in required_fields:
+                        if field not in obj:
+                            errors.append(f"Line {i}: Missing field '{field}'")
+                    
+                    # Check content
+                    if 'text' in obj and not obj['text'].strip():
+                        warnings.append(f"Line {i}: Empty text field")
+                    
+                except json.JSONDecodeError as e:
+                    errors.append(f"Line {i}: Invalid JSON - {e}")
+    
+    elif path.suffix == '.csv':
+        with open(path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader, 1):
+                samples_checked += 1
+                if not row.get('content', '').strip():
+                    warnings.append(f"Row {i}: Empty content")
+    
+    # Summary
+    print("\n" + "=" * 70)
+    print("SYNTAX VALIDATION")
+    print("=" * 70)
+    print(f"File:               {path}")
+    print(f"Samples checked:    {samples_checked}")
+    print(f"Errors:             {len(errors)}")
+    print(f"Warnings:           {len(warnings)}")
+    
+    if errors:
+        print("\nERRORS:")
+        for error in errors[:10]:
+            print(f"  - {error}")
+        if len(errors) > 10:
+            print(f"  ... and {len(errors) - 10} more")
+    
+    if warnings:
+        print("\nWARNINGS:")
+        for warning in warnings[:5]:
+            print(f"  - {warning}")
+        if len(warnings) > 5:
+            print(f"  ... and {len(warnings) - 5} more")
+    
+    status = "PASSED" if not errors else "FAILED"
+    print(f"\nStatus:             {status}")
+    print("=" * 70 + "\n")
+    
+    return 0 if not errors else 1
+
+
+# --------------------------------------------------
+# COMMAND: STATS
+# --------------------------------------------------
+def cmd_stats(file_path: str):
+    """
+    Compute quality and length statistics.
+    
+    Usage: sheikh stats <file>
+    """
+    logger = setup_logging("sheikh.stats")
+    
+    path = Path(file_path)
+    if not path.exists():
+        logger.error(f"File not found: {path}")
+        return 1
+    
+    logger.info(f"Computing statistics for: {path}")
+    
+    lengths = []
+    word_counts = []
+    samples = []
+    
+    if path.suffix == '.jsonl':
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                obj = json.loads(line)
+                text = obj.get('text', obj.get('content', ''))
+                if text:
+                    lengths.append(len(text))
+                    word_counts.append(len(text.split()))
+                    samples.append(obj)
+    
+    elif path.suffix == '.csv':
+        with open(path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                content = row.get('content', '')
+                if content:
+                    lengths.append(len(content))
+                    word_counts.append(len(content.split()))
+                    samples.append(row)
+    
+    if not samples:
+        logger.error("No samples found")
+        return 1
+    
+    # Compute statistics
+    report = {
+        "total_samples": len(samples),
+        "char_stats": {
+            "min": min(lengths),
+            "max": max(lengths),
+            "mean": int(statistics.mean(lengths)),
+            "median": int(statistics.median(lengths)),
+            "stdev": int(statistics.stdev(lengths)) if len(lengths) > 1 else 0
+        },
+        "word_stats": {
+            "min": min(word_counts),
+            "max": max(word_counts),
+            "mean": int(statistics.mean(word_counts)),
+            "median": int(statistics.median(word_counts))
+        }
+    }
+    
+    # Output
+    print("\n" + "=" * 70)
+    print("QUALITY STATISTICS")
+    print("=" * 70)
+    print(f"File:               {path}")
+    print(f"Total samples:      {report['total_samples']:,}")
+    print(f"\nCharacter Length:")
+    print(f"  Min:              {report['char_stats']['min']:,}")
+    print(f"  Max:              {report['char_stats']['max']:,}")
+    print(f"  Mean:             {report['char_stats']['mean']:,}")
+    print(f"  Median:           {report['char_stats']['median']:,}")
+    print(f"  Std Dev:          {report['char_stats']['stdev']:,}")
+    print(f"\nWord Count:")
+    print(f"  Min:              {report['word_stats']['min']:,}")
+    print(f"  Max:              {report['word_stats']['max']:,}")
+    print(f"  Mean:             {report['word_stats']['mean']:,}")
+    print(f"  Median:           {report['word_stats']['median']:,}")
+    print("=" * 70 + "\n")
+    
+    # Save report
+    report_file = Path("reports") / "quality_report.json"
+    report_file.parent.mkdir(exist_ok=True)
+    with open(report_file, 'w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Report saved to: {report_file}")
+    return 0
+
+
+# --------------------------------------------------
+# COMMAND: SPLIT
+# --------------------------------------------------
+def cmd_split(file_path: str, train_ratio: float = 0.8, stratify: bool = True):
+    """
+    Create train/validation split.
+    
+    Usage: sheikh split <file> [train_ratio] [--stratify]
+    """
+    logger = setup_logging("sheikh.split")
+    
+    path = Path(file_path)
+    if not path.exists():
+        logger.error(f"File not found: {path}")
+        return 1
+    
+    logger.info(f"Creating split for: {path}")
+    logger.info(f"Train ratio: {train_ratio}, Stratified: {stratify}")
+    
+    samples = []
+    
+    if path.suffix == '.jsonl':
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                obj = json.loads(line)
+                text = obj.get('text', obj.get('content', ''))
+                if text:
+                    obj['_text'] = text
+                    samples.append(obj)
+    
+    elif path.suffix == '.csv':
+        with open(path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get('content'):
+                    row['content'] = row['content']
+                    samples.append(row)
+    
+    if not samples:
+        logger.error("No samples found")
+        return 1
+    
+    # Stratify by length buckets
+    if stratify:
+        buckets = {"short": [], "medium": [], "long": []}
+        for sample in samples:
+            text = sample.get('_text', '')
+            length = len(text)
+            if length < 1500:
+                buckets["short"].append(sample)
+            elif length < 3000:
+                buckets["medium"].append(sample)
+            else:
+                buckets["long"].append(sample)
+        
+        train, val = [], []
+        for bucket in buckets.values():
+            import random
+            random.shuffle(bucket)
+            split_idx = int(len(bucket) * train_ratio)
+            train.extend(bucket[:split_idx])
+            val.extend(bucket[split_idx:])
+    else:
+        import random
+        random.shuffle(samples)
+        split_idx = int(len(samples) * train_ratio)
+        train, val = samples[:split_idx], samples[split_idx:]
+    
+    # Output files
+    base_name = path.stem
+    train_path = DEFAULT_DATA_DIR / f"{base_name}_train.jsonl"
+    val_path = DEFAULT_DATA_DIR / f"{base_name}_val.jsonl"
+    
+    # Save train
+    with open(train_path, 'w', encoding='utf-8') as f:
+        for sample in train:
+            sample_copy = {k: v for k, v in sample.items() if k != '_text'}
+            f.write(json.dumps(sample_copy, ensure_ascii=False) + "\n")
+    
+    # Save val
+    with open(val_path, 'w', encoding='utf-8') as f:
+        for sample in val:
+            sample_copy = {k: v for k, v in sample.items() if k != '_text'}
+            f.write(json.dumps(sample_copy, ensure_ascii=False) + "\n")
+    
+    print("\n" + "=" * 70)
+    print("DATASET SPLIT")
+    print("=" * 70)
+    print(f"Input:              {path}")
+    print(f"Train:              {train_path} ({len(train)} samples)")
+    print(f"Validation:         {val_path} ({len(val)} samples)")
+    print(f"Train ratio:        {train_ratio}")
+    print(f"Stratified:         {stratify}")
+    print("=" * 70 + "\n")
+    
+    return 0
+
+
+# --------------------------------------------------
+# COMMAND: PUSH
+# --------------------------------------------------
+def cmd_push(file_path: str, repo_id: Optional[str] = None, private: bool = False):
+    """
+    Push dataset to Hugging Face Hub.
+    
+    Usage: sheikh push <file> [--repo-id ID] [--private]
+    """
+    logger = setup_logging("sheikh.push")
+    
+    path = Path(file_path)
+    if not path.exists():
+        logger.error(f"File not found: {path}")
+        return 1
+    
+    # Check for HF_TOKEN
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        logger.error("HF_TOKEN not set. Run: export HF_TOKEN=your_token")
+        return 1
+    
+    logger.info(f"Preparing to push: {path}")
+    
+    try:
+        from datasets import load_dataset, DatasetDict
+        
+        # Load dataset
+        base_name = path.stem
+        if path.suffix == '.jsonl':
+            ds = load_dataset("json", data_files=str(path))
+        elif path.suffix == '.csv':
+            ds = load_dataset("csv", data_files=str(path))
+        else:
+            logger.error("Unsupported format. Use .jsonl or .csv")
+            return 1
+        
+        # Determine repo_id
+        if not repo_id:
+            repo_id = f"osamabinlikhon/{base_name}"
+        
+        logger.info(f"Pushing to: {repo_id}")
+        
+        # Push to hub
+        ds.push_to_hub(repo_id, token=token, private=private)
+        
+        print("\n" + "=" * 70)
+        print("HUGGING FACE UPLOAD")
+        print("=" * 70)
+        print(f"File:               {path}")
+        print(f"Repo:               {repo_id}")
+        print(f"Status:             SUCCESS")
+        print("=" * 70 + "\n")
+        
+        return 0
+        
+    except ImportError:
+        logger.error("datasets library not installed. Run: pip install datasets")
+        return 1
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        return 1
+
+
+# --------------------------------------------------
+# MAIN CLI
+# --------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        prog="sheikh",
+        description=f"{Fore.CYAN}Sheikh{Style.RESET_ALL} - Bangla Dataset CLI Tool {Fore.GREEN}v{VERSION}{Style.RESET_ALL}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+{Fore.YELLOW}Examples:{Style.RESET_ALL}
+    {Fore.GREEN}# Domain mode (sitemap discovery){Style.RESET_ALL}
+    sheikh scrape allbanglachoti.com 1000
+    sheikh scrape allbanglachoti.com 1000 --workers 20 --rate 0.2
+    
+    {Fore.GREEN}# Hub mode (link extraction from hub page){Style.RESET_ALL}
+    sheikh scrape https://sites.google.com/view/allbanglachoti/bangla-choti 500 --mode hub
+    sheikh scrape https://sites.google.com/view/... 1000 --mode hub --allow-domains www.allbanglachoti.com
+    
+    {Fore.GREEN}# Dataset commands{Style.RESET_ALL}
+    sheikh syntax data/train.jsonl
+    sheikh stats data/train.jsonl
+    sheikh split data/train.jsonl 0.8
+    sheikh push data/train.jsonl --repo-id myname/dataset
+
+{Fore.YELLOW}Commands:{Style.RESET_ALL}
+    scrape   Scrape a domain or hub page (async, multi-worker)
+    syntax   Validate dataset syntax and schema
+    stats    Compute quality and length statistics
+    split    Create train/validation split
+    push     Push dataset to Hugging Face Hub
+
+{Fore.YELLOW}Discovery Modes:{Style.RESET_ALL}
+    --mode domain   Discover URLs from sitemap (default)
+    --mode hub      Extract links from hub page (Google Sites, index pages)
+
+{Fore.YELLOW}Async Scraping Options:{Style.RESET_ALL}
+    --workers N     Number of concurrent workers (default: {DEFAULT_CONCURRENT_WORKERS})
+    --rate R        Seconds between requests per worker (default: {DEFAULT_RATE_LIMIT})
+    --resume        Resume interrupted scraping sessions
+    --no-robots     Skip robots.txt compliance check
+        """
+    )
+    
+    parser.add_argument('--version', action='version', version=f'Sheikh v{VERSION}')
+    
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+    
+    # Scrape command
+    scrape_parser = subparsers.add_parser('scrape', help='Scrape a domain or hub page')
+    scrape_parser.add_argument('target', help='Domain or hub URL to scrape (e.g., allbanglachoti.com or https://sites.google.com/...)')
+    scrape_parser.add_argument('max_urls', nargs='?', type=int, default=100, 
+                              help='Maximum URLs to scrape (default: 100)')
+    scrape_parser.add_argument('--output', '-o', help='Output file path')
+    scrape_parser.add_argument('--workers', '-w', type=int, default=DEFAULT_CONCURRENT_WORKERS,
+                              help=f'Number of concurrent workers (default: {DEFAULT_CONCURRENT_WORKERS})')
+    scrape_parser.add_argument('--rate', '-r', type=float, default=DEFAULT_RATE_LIMIT,
+                              help=f'Requests per second per worker (default: {DEFAULT_RATE_LIMIT})')
+    scrape_parser.add_argument('--resume', action='store_true',
+                              help='Resume from previous session')
+    scrape_parser.add_argument('--no-robots', action='store_true',
+                              help='Skip robots.txt compliance check')
+    scrape_parser.add_argument('--mode', '-m', choices=['domain', 'hub'], default='domain',
+                              help='Discovery mode: domain (sitemap) or hub (link extraction) (default: domain)')
+    scrape_parser.add_argument('--allow-domains', '-d', 
+                              help='Comma-separated list of allowed domains for hub mode (e.g., www.allbanglachoti.com)')
+    
+    # Syntax command
+    syntax_parser = subparsers.add_parser('syntax', help='Validate dataset syntax')
+    syntax_parser.add_argument('file', help='Dataset file to validate')
+    
+    # Stats command
+    stats_parser = subparsers.add_parser('stats', help='Compute quality statistics')
+    stats_parser.add_argument('file', help='Dataset file to analyze')
+    
+    # Split command
+    split_parser = subparsers.add_parser('split', help='Create train/val split')
+    split_parser.add_argument('file', help='Dataset file to split')
+    split_parser.add_argument('ratio', nargs='?', type=float, default=0.8,
+                             help='Train ratio (default: 0.8)')
+    split_parser.add_argument('--no-stratify', action='store_true',
+                             help='Disable stratified splitting')
+    
+    # Push command
+    push_parser = subparsers.add_parser('push', help='Push to Hugging Face')
+    push_parser.add_argument('file', help='Dataset file to push')
+    push_parser.add_argument('--repo-id', '-r', help='Repository ID (default: auto)')
+    push_parser.add_argument('--private', action='store_true', help='Private repo')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 1
+    
+    # Execute command
+    if args.command == 'scrape':
+        # Parse allow_domains list
+        allow_domains = None
+        if hasattr(args, 'allow_domains') and args.allow_domains:
+            allow_domains = [d.strip() for d in args.allow_domains.split(',')]
+        
+        return cmd_scrape(
+            args.target, 
+            args.max_urls, 
+            args.output,
+            args.workers,
+            args.rate,
+            args.resume,
+            not args.no_robots,
+            args.mode,
+            allow_domains
+        )
+    
+    elif args.command == 'syntax':
+        return cmd_syntax(args.file)
+    
+    elif args.command == 'stats':
+        return cmd_stats(args.file)
+    
+    elif args.command == 'split':
+        stratify = not args.no_stratify
+        return cmd_split(args.file, args.ratio, stratify)
+    
+    elif args.command == 'push':
+        return cmd_push(args.file, args.repo_id, args.private)
+    
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
