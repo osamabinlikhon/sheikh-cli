@@ -1,0 +1,111 @@
+# শেখ ML পাইপলাইন কনফিগারেশন
+# ==========================================
+# এই ফাইলে মডেল ট্রেনিংয়ের সমস্ত কনফিগারেশন প্যারামিটার আছে।
+# Bengali language model training configuration
+
+# মডেল আইডেন্টিফিকেশন
+model_name: "sheikh-bangla-110m"
+model_revision: "v1.0"
+language: "bn"
+tags:
+  - bangla
+  - language-model
+  - causal-lm
+
+# Hugging Face রিপোজিটরি সেটিংস
+huggingface:
+  repo_type: "model"
+  private: false
+  exist_ok: true
+
+# টোকেনাইজার সেটিংস
+tokenizer:
+  type: "BPE"
+  vocab_size: 30000
+  min_frequency: 2
+  special_tokens:
+    - "[PAD]"
+    - "[UNK]"
+    - "[CLS]"
+    - "[SEP]"
+    - "[MASK]"
+  continuing_subword_prefix: "##"
+  normalizer: "NFC"
+
+# মডেল আর্কিটেকচার
+model:
+  vocab_size: 30000
+  max_length: 512
+  hidden_size: 768
+  num_attention_heads: 12
+  num_hidden_layers: 12
+  intermediate_size: 3072
+  activation_function: "gelu"
+  dropout_rate: 0.1
+  layer_norm_epsilon: 1.0e-5
+  initializer_range: 0.02
+
+# ট্রেনিং প্যারামিটার
+training:
+  learning_rate: 5.0e-5
+  train_batch_size: 8
+  eval_batch_size: 8
+  num_train_epochs: 3
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  
+  # অপ্টিমাইজার সেটিংস
+  optimizer:
+    type: "adamw"
+    beta1: 0.9
+    beta2: 0.999
+    epsilon: 1.0e-8
+  
+  # শিডিউলার সেটিংস
+  scheduler:
+    type: "linear"
+    num_warmup_steps: 500
+
+# লগিং এবং চেকপয়েন্ট
+logging:
+  logging_steps: 100
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+
+# ডেটা সেটিংস
+dataset:
+  max_samples: 1000
+  text_field: "text"
+  min_text_length: 50
+  max_text_length: 10000
+
+# আউটপুট সেটিংস
+output:
+  base_dir: "./output"
+  subdirs:
+    models: "models"
+    tokenizer: "tokenizer"
+    logs: "logs"
+    cache: ".cache"
+  save_strategy: "steps"
+
+# হার্ডওয়্যার সেটিংস
+hardware:
+  device: "auto"  # auto, cuda, cpu
+  fp16: true
+  bf16: false
+  dataloader_num_workers: 0
+
+# সিড সেটিংস (রিপ্রোডিউসিবিলিটির জন্য)
+seed: 42
+
+# ডিবাগ মোড
+debug:
+  verbose: false
+  profile: false
+  trace: false
