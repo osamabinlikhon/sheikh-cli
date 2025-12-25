@@ -1,0 +1,24 @@
+[book]
+title = "Sheikh CLI - বাংলা ডেটাসেট টুল"
+description = "Production-grade CLI tool for Bangla language dataset scraping and processing"
+authors = ["Likhon Sheikh"]
+language = "bn"
+multilingual = false
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[output.html]
+site-url = "/sheikh-cli/"
+git-repository-url = "https://github.com/osamabinlikhon/sheikh-cli"
+edit-url-template = "https://github.com/osamabinlikhon/sheikh-cli/edit/main/{path}"
+
+[output.html.fold]
+enable = true
+
+[output.html.playground]
+editable = true
+
+[output.html.search]
+use-middle-down = true
