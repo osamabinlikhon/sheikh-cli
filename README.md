@@ -1,4 +1,4 @@
-# Bangla Datasets for LLM Fine-Tuning
+# শেখ (Sheikh) একটি প্রোডাকশন-গ্রেড কমান্ড-লাইন ইন্টারফেস (CLI) টুল যা বাংলা ভাষার ডেটাসেট সংগ্রহ, প্রসেসিং এবং মেশিন লার্নিং মডেল ট্রেনিংয়ের জন্য ডিজাইন করা হয়েছে। এই টুলটি বাংলা ওয়েবসাইট থেকে ডেটা সংগ্রহ করতে, সেই ডেটা প্রসেস করতে এবং AI মডেল ট্রেনিংয়ের জন্য প্রস্তুত করতে সক্ষম।
 
 <div align="center">
 
@@ -7,7 +7,10 @@
 ![Format](https://img.shields.io/badge/Format-JSONL-yellow.svg)
 ![Tasks](https://img.shields.io/badge/Tasks-4-orange.svg)
 
-**High-quality Bangla language instruction tuning dataset for supervised fine-tuning**
+
+
+মূল বৈশিষ্ট্যসমূহ
+এই টুলটি অসংখ্য শক্তিশালী ফিচার সরবরাহ করে যা বাংলা ডেটা সংগ্রহকে সহজ এবং কার্যকর করে তোলে। প্রথমত, এটি উচ্চ-পারফরম্যান্স অ্যাসিঙ্ক্রোনাস স্ক্রেপিং (aiohttp) ব্যবহার করে যা একই সাথে অনেকগুলি পেজ থেকে ডেটা সংগ্রহ করতে সক্ষম। দ্বিতীয়ত, গুগল সাইট এবং ইনডেক্স পেজ থেকে লিংক বের করার জন্য হাব মোড সাপোর্ট করে। তৃতীয়ত, CSV এবং JSONL ফরম্যাটে ডেটা সংরক্ষণ করতে পারে। চতুর্থত, টার্মিনালে রঙিন প্রগ্রেস বার এবং লগিং সুবিধা প্রদান করে। পঞ্চতমত, মাল্টি-ডোমেইন সাপোর্ট এবং ফিল্টারিং করতে পারে। অবশেষে, কনকারেন্সি কন্ট্রোল এবং রেট লিমিটিং সুবিধা রয়েছে।
 
 [GitHub](https://github.com/osamabinlikhon/bangla-datasets) •
 [Hugging Face](https://huggingface.co/datasets/osamabinlikhon/bangla-datasets) •
