@@ -1,0 +1,47 @@
+{
+  "name": "sheikh-cli",
+  "version": "2.1.0",
+  "description": "🇧🇩 Sheikh CLI - Powerful Bangla Web Scraping Tool with Playwright",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "sheikh": "./bin/sheikh.js"
+  },
+  "scripts": {
+    "test": "node test.js",
+    "scrape": "node bin/sheikh.js scrape",
+    "browse": "node bin/sheikh.js browse",
+    "install-browser": "npx playwright install chromium"
+  },
+  "keywords": [
+    "bangla",
+    "scraper",
+    "playwright",
+    "cli",
+    "web-scraping",
+    "anti-blocking",
+    "headless"
+  ],
+  "author": "Likhon Sheikh <osamabinlikhon@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/osamabinlikhon/sheikh-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/osamabinlikhon/sheikh-cli/issues"
+  },
+  "homepage": "https://github.com/osamabinlikhon/sheikh-cli",
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "cli-table3": "^0.6.3",
+    "colors": "^1.4.0",
+    "commander": "^11.1.0",
+    "fs-extra": "^11.2.0",
+    "playwright": "^1.57.0",
+    "turndown": "^7.1.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
