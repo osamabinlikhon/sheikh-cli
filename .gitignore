@@ -1,0 +1,41 @@
+# Environment variables
+.env
+
+# Logs
+*.log
+logs/
+
+# Output directories
+out_*/
+outputs/
+
+# Data directories
+data/
+*.bin
+
+# Model files
+model/*/pytorch_model.bin
+model/*/model.safetensors
+
+# Tokenizer files
+tokenizer.json
+vocab.json
+merges.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
