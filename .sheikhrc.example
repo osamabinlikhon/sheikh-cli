@@ -1,0 +1,125 @@
+/**
+ * Sheikh Configuration File Example
+ * 
+ * Copy this to ~/.sheikhrc and customize for your needs
+ * 
+ * Configuration format: JSON or YAML
+ */
+
+{
+  // OpenRouter API Configuration
+  // Get your API key from https://openrouter.ai/keys
+  "openrouter": {
+    // YOUR API KEY HERE - get from https://openrouter.ai/keys
+    "apiKey": "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",
+    
+    // LLM model to use
+    // Options: anthropic/claude-3-5-sonnet, openai/gpt-4o, openai/gpt-4o-mini, etc.
+    // See available models at https://openrouter.ai/docs#models
+    "model": "anthropic/claude-3-5-sonnet",
+    
+    // Temperature (0-1): Lower = more focused, Higher = more creative
+    "temperature": 0.7,
+    
+    // Maximum tokens in response
+    "maxTokens": 4096,
+    
+    // Site URL for API tracking (optional)
+    "siteUrl": "https://github.com/sheikh/cli",
+    
+    // App title for API tracking (optional)
+    "appTitle": "Sheikh CLI"
+  },
+
+  // Plugin Configuration
+  "plugins": {
+    // List of enabled plugins by name
+    "enabled": [
+      "shell",
+      "filesystem"
+    ],
+    
+    // Additional plugin search paths
+    "paths": [
+      "./plugins",
+      "/Users/yourname/.sheikh/plugins"
+    ]
+  },
+
+  // User Interface Configuration
+  "ui": {
+    // Color theme: dark, light, or auto
+    "theme": "dark",
+    
+    // Enable streaming responses (show thinking as it happens)
+    "streaming": true,
+    
+    // Compact mode (fewer visual elements)
+    "compact": false
+  },
+
+  // Safety Configuration
+  "safety": {
+    // Policy for dangerous commands:
+    // "allow" - execute without warning
+    // "confirm" - ask before executing (recommended)
+    // "block" - refuse to execute
+    "dangerousCommands": "confirm",
+    
+    // Additional patterns that require confirmation (regex)
+    "confirmPatterns": [
+      "rm -rf",
+      "rm -r",
+      "dd if=",
+      "mkfs",
+      "chmod -R 000",
+      "chown -R",
+      ":\\(\\){:|:&};:",
+      "> /dev/null",
+      "wget",
+      "curl.*-O"
+    ],
+    
+    // Maximum shell output bytes to display (prevents terminal flooding)
+    "maxShellOutput": 10000
+  },
+
+  // System Configuration
+  "system": {
+    // Shell to use for command execution
+    "shell": "/bin/zsh",
+    
+    // Working directory (defaults to current directory)
+    // "workingDirectory": "/Users/yourname/projects",
+    
+    // Additional environment variables
+    "env": {
+      // "EDITOR": "vim",
+      // "TERM": "xterm-256color"
+    }
+  }
+}
+
+/*
+ * YAML Example (alternative format):
+ * 
+ * openrouter:
+ *   apiKey: sk-or-v1-your-key-here
+ *   model: anthropic/claude-3-5-sonnet
+ *   temperature: 0.7
+ * 
+ * plugins:
+ *   enabled:
+ *     - shell
+ *     - filesystem
+ * 
+ * ui:
+ *   theme: dark
+ *   streaming: true
+ * 
+ * safety:
+ *   dangerousCommands: confirm
+ * 
+ * system:
+ *   shell: /bin/zsh
+ */
