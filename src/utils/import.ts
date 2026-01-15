@@ -11,14 +11,18 @@
 export async function dynamicImport<T = unknown>(modulePath: string): Promise<T> {
   try {
     // Use dynamic import for ESM modules
-    if (typeof window === 'undefined' && typeof process !== 'undefined') {
+    if (typeof process !== 'undefined' && process.versions?.node) {
       return await import(modulePath);
     }
     throw new Error('Dynamic import not supported in this environment');
   } catch (error) {
     // Fallback for CommonJS or when ESM import fails
-    const module = await require(modulePath);
-    return module as T;
+    try {
+      const module = await require(modulePath);
+      return module as T;
+    } catch {
+      throw error;
+    }
   }
 }
 
@@ -26,8 +30,8 @@ export async function dynamicImport<T = unknown>(modulePath: string): Promise<T>
  * Import a JSON file dynamically
  */
 export async function importJson<T = unknown>(jsonPath: string): Promise<T> {
-  const content = await dynamicImport<{ default: T }>(jsonPath);
-  return content.default || content;
+  const content = await dynamicImport<{ default: T } | T>(jsonPath);
+  return (content as any).default || content;
 }
 
 /**
@@ -35,9 +39,10 @@ export async function importJson<T = unknown>(jsonPath: string): Promise<T> {
  */
 export async function loadScript(scriptPath: string): Promise<void> {
   const module = await dynamicImport(scriptPath);
+  const modAny = module as any;
   
-  if (module.default && typeof module.default === 'function') {
-    await module.default();
+  if (modAny.default && typeof modAny.default === 'function') {
+    await modAny.default();
   } else if (typeof module === 'function') {
     await module();
   }

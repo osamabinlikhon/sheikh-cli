@@ -38,7 +38,14 @@ export class OpenRouterLLM {
    * Convert internal message format to OpenAI format
    */
   private toOpenAIMessage(message: Message): OpenAI.Chat.ChatCompletionMessageParam {
-    const msg: OpenAI.Chat.ChatCompletionMessageParam = {
+    const msg: OpenAI.Chat.ChatCompletionMessageParam & { tool_calls?: Array<{
+      id: string;
+      type: 'function';
+      function: {
+        name: string;
+        arguments: string;
+      };
+    }> } = {
       role: message.role as 'user' | 'assistant' | 'system',
       content: message.content
     };
@@ -66,7 +73,7 @@ export class OpenRouterLLM {
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters as OpenAI.Chat.ChatCompletionToolFunctionParameters
+        parameters: tool.parameters as unknown as Record<string, unknown>
       }
     }));
   }

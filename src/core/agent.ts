@@ -203,7 +203,13 @@ You have access to tools that can execute commands, read/write files, and intera
       const cfg = this.config.getConfig();
       
       if (cfg.ui.streaming) {
-        return await this.streamResponse(availableTools);
+        // Use streaming response
+        for await (const chunk of this.streamResponseGen(availableTools)) {
+          // Chunks are handled internally by streamResponseGen
+        }
+        // Get the last assistant message after streaming completes
+        const messages = this.messages.filter(m => m.role === 'assistant');
+        return messages[messages.length - 1] || this.addMessage({ role: 'assistant', content: '' });
       } else {
         return await this.completeResponse(availableTools);
       }
@@ -222,7 +228,7 @@ You have access to tools that can execute commands, read/write files, and intera
   /**
    * Process with streaming response
    */
-  private async *streamResponse(tools: Tool[]): AsyncGenerator<StreamingChunk, Message, unknown> {
+  private async function* streamResponseGen(tools: Tool[]): AsyncGenerator<StreamingChunk, void, unknown> {
     const responseMessages: Message[] = [];
     let assistantMessage = this.addMessage({
       role: 'assistant',

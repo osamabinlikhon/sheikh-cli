@@ -108,7 +108,8 @@ export class PluginLoader {
       const pluginModule = await dynamicImport(mainPath);
       
       // Get the plugin factory or default export
-      const pluginExport = pluginModule.default || pluginModule;
+      const pluginAny = pluginModule as any;
+      const pluginExport = pluginAny.default || pluginModule;
       
       if (typeof pluginExport !== 'function') {
         return {

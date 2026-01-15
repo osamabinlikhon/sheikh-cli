@@ -30,7 +30,7 @@ function Input({
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [suggestions, setSuggestions] = useState<string[]>([]);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<any>(null);
 
   // Focus input on mount
   useEffect(() => {
@@ -39,13 +39,22 @@ function Input({
     }
   }, []);
 
+  // Simple in-memory history storage for terminal environment
+  let memoryHistory: HistoryItem[] = [];
+
   // Load history from storage on mount
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('sheikh-history');
-      if (saved) {
+      // Try to load from file system first (Node.js environment)
+      const { readFileSync, existsSync } = require('fs');
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      const historyFile = `${homeDir}/.sheikh_history`;
+      
+      if (existsSync(historyFile)) {
+        const saved = readFileSync(historyFile, 'utf-8');
         const parsed = JSON.parse(saved);
         setHistory(parsed);
+        memoryHistory = parsed;
       }
     } catch {
       // Ignore history loading errors
@@ -60,9 +69,14 @@ function Input({
     const newItem = { value: input.trim(), timestamp: new Date() };
     const newHistory = [newItem, ...history.slice(0, 99)]; // Keep last 100 items
     setHistory(newHistory);
+    memoryHistory = newHistory;
     
     try {
-      localStorage.setItem('sheikh-history', JSON.stringify(newHistory));
+      // Save to file system (Node.js environment)
+      const { writeFileSync, existsSync } = require('fs');
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      const historyFile = `${homeDir}/.sheikh_history`;
+      writeFileSync(historyFile, JSON.stringify(newHistory));
     } catch {
       // Ignore history saving errors
     }
@@ -155,7 +169,7 @@ function Input({
           onSubmit={handleSubmit}
           placeholder={disabled ? 'Processing...' : placeholder}
           focus={!disabled}
-          ref={inputRef as React.RefObject<import('ink-text-input').TextInputProps>}
+        />
         />
         {disabled && (
           <Text color="yellow"> ◐</Text>
@@ -166,7 +180,7 @@ function Input({
       {suggestions.length > 0 && (
         <Box flexDirection="column" marginTop={0} marginLeft={8}>
           {suggestions.map((suggestion, index) => (
-            <Text key={index} color="gray" dim>
+            <Text key={index} color="gray">
               {index === 0 ? '▸ ' : '  '}{suggestion}
             </Text>
           ))}
@@ -176,7 +190,7 @@ function Input({
       {/* History indicator */}
       {history.length > 0 && historyIndex === -1 && (
         <Box marginTop={0}>
-          <Text color="gray" dim>
+          <Text color="gray">
             ↑ {history.length} previous {history.length === 1 ? 'command' : 'commands'}
           </Text>
         </Box>
@@ -185,7 +199,7 @@ function Input({
       {/* Current history item indicator */}
       {historyIndex >= 0 && (
         <Box marginTop={0}>
-          <Text color="gray" dim>
+          <Text color="gray">
             Viewing history ({historyIndex + 1}/{history.length}): Press Enter to use, ↓ to clear
           </Text>
         </Box>

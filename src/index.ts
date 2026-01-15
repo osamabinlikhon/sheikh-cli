@@ -23,7 +23,8 @@ export { FileSystemTool, createFileSystemTool } from './tools/filesystem.js';
 // Plugins
 export { PluginLoader, createPluginLoader } from './plugins/loader.js';
 export type { PluginLoadResult } from './plugins/loader.js';
-export * from './plugins/types.js';
+// Re-export specific types to avoid conflicts
+export type { Plugin, PluginContext, PluginHooks, SheikhPlugin } from './plugins/types.js';
 
 // UI Components
 export { default as App } from './components/App.js';

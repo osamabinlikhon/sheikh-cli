@@ -75,7 +75,7 @@ function SetupScreen({ onComplete }: SetupScreenProps) {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || `HTTP ${response.status}`);
+        throw new Error((errorData as any)?.error?.message || `HTTP ${response.status}`);
       }
 
       setState(prev => ({ ...prev, isLoading: false, success: true, step: 'complete' }));
@@ -110,7 +110,7 @@ function SetupScreen({ onComplete }: SetupScreenProps) {
         
         <Box marginTop={2} flexDirection="column">
           <Text color="white">Welcome to Sheikh!</Text>
-          <Text color="gray" dim>
+          <Text color="gray">
             An extensible, terminal-first agentic tool for developers.
           </Text>
         </Box>
@@ -119,7 +119,7 @@ function SetupScreen({ onComplete }: SetupScreenProps) {
           <Text color="yellow" bold>Before we begin, you'll need:</Text>
           <Box marginTop={1} marginLeft={2} flexDirection="column">
             <Text color="gray">1. An OpenRouter API key</Text>
-            <Text color="gray" dim>   Get one at: https://openrouter.ai/keys</Text>
+            <Text color="gray">   Get one at: https://openrouter.ai/keys</Text>
           </Box>
         </Box>
 
@@ -138,10 +138,10 @@ function SetupScreen({ onComplete }: SetupScreenProps) {
         
         <Box marginTop={2} flexDirection="column">
           <Text color="white">Enter your OpenRouter API key:</Text>
-          <Text color="gray" dim>
+          <Text color="gray">
             The key starts with 'sk-or-v1-' and looks like:
           </Text>
-          <Text color="gray" dim>
+          <Text color="gray">
             sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
           </Text>
         </Box>
@@ -177,7 +177,7 @@ function SetupScreen({ onComplete }: SetupScreenProps) {
         )}
 
         <Box marginTop={3}>
-          <Text color="gray" dim>Press ENTER to verify | Ctrl+C to cancel</Text>
+          <Text color="gray">Press ENTER to verify | Ctrl+C to cancel</Text>
         </Box>
       </Box>
     );
@@ -187,7 +187,7 @@ function SetupScreen({ onComplete }: SetupScreenProps) {
   if (state.step === 'complete') {
     return (
       <Box flexDirection="column" padding={2}>
-        <Text color="green" bold size={20}>✓</Text>
+        <Text color="green" bold>✓</Text>
         
         <Box marginTop={1}>
           <Text color="green">API key verified successfully!</Text>

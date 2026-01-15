@@ -49,7 +49,7 @@ function MessageBubble({ message }: { message: Message }) {
       <Box flexDirection="column" marginBottom={1}>
         <Box>
           <Text color="cyan" bold>You</Text>
-          <Text color="gray" dim> {formatTimestamp(message.timestamp)}</Text>
+          <Text color="gray"> {formatTimestamp(message.timestamp)}</Text>
         </Box>
         <Box marginTop={0}>
           <Text wrap="wrap">{message.content}</Text>
@@ -63,7 +63,7 @@ function MessageBubble({ message }: { message: Message }) {
       <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="gray" paddingX={1}>
         <Box>
           <Text color="magenta" bold>Tool Result</Text>
-          <Text color="gray" dim> {formatTimestamp(message.timestamp)}</Text>
+          <Text color="gray"> {formatTimestamp(message.timestamp)}</Text>
         </Box>
         <Box marginTop={0}>
           <Text wrap="wrap" color="gray">
@@ -81,7 +81,7 @@ function MessageBubble({ message }: { message: Message }) {
       <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="green" paddingX={1}>
         <Box>
           <Text color="green" bold>Sheikh</Text>
-          <Text color="gray" dim> {formatTimestamp(message.timestamp)}</Text>
+          <Text color="gray"> {formatTimestamp(message.timestamp)}</Text>
         </Box>
         
         {/* Tool calls display */}
@@ -107,7 +107,7 @@ function MessageBubble({ message }: { message: Message }) {
                 </Text>
                 {result.output && (
                   <Box marginTop={0}>
-                    <Text color="gray" dim>
+                      <Text color="gray">
                       {result.output.substring(0, 200)}
                       {result.output.length > 200 && '...'}
                     </Text>
@@ -136,7 +136,7 @@ function MessageBubble({ message }: { message: Message }) {
   // System messages
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text color="gray" dim italic>{message.content}</Text>
+      <Text color="gray" italic>{message.content}</Text>
     </Box>
   );
 }
@@ -158,8 +158,8 @@ function Chat({ messages, state }: ChatProps) {
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
         {displayMessages.length === 0 ? (
           <Box flexDirection="column" justifyContent="center" alignItems="center" flexGrow={1}>
-            <Text color="gray" dim>No messages yet</Text>
-            <Text color="gray" dim>Ask me something to get started!</Text>
+            <Text color="gray">No messages yet</Text>
+            <Text color="gray">Ask me something to get started!</Text>
           </Box>
         ) : (
           displayMessages.map((message, index) => (

@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { SheikhConfig } from './types.js';
+import { SheikhConfig } from './types.ts';
 
 const DEFAULT_CONFIG: SheikhConfig = {
   openrouter: {
@@ -118,9 +118,9 @@ export class ConfigLoader {
       }
       
       // Handle boolean and number
-      if (value === 'true') value = true;
-      else if (value === 'false') value = false;
-      else if (!isNaN(Number(value)) && value !== '') value = Number(value);
+      if (value === 'true') value = true as any;
+      else if (value === 'false') value = false as any;
+      else if (!isNaN(Number(value)) && value !== '') value = Number(value) as any;
       
       // Handle nested objects
       if (trimmed.endsWith(':') && !trimmed.includes('#')) {

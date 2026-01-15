@@ -129,7 +129,9 @@ function App({ cli }: AppProps) {
     } else {
       const config = getConfig();
       config.setApiKey(apiKey);
-      window.location.reload(); // Simple reload to reinitialize
+      // Restart the application
+      console.log('\nConfiguration updated. Please run sheikh again.');
+      process.exit(0);
     }
     setIsSetup(false);
   }, [agent]);
@@ -171,11 +173,11 @@ function App({ cli }: AppProps) {
         <Box flexDirection="column">
           <Text color="cyan" bold>{gradient.pastel('Sheikh')}</Text>
           <Box flexDirection="row" gap={2}>
-            <Text color="gray" dim>Model: {agentState.currentModel}</Text>
-            <Text color="gray" dim>│</Text>
-            <Text color="gray" dim>Tokens: {agentState.tokenUsage.total}</Text>
-            <Text color="gray" dim>│</Text>
-            <Text color="gray" dim>Shell: {shellInfo?.shell || 'unknown'}</Text>
+            <Text color="gray">Model: {agentState.currentModel}</Text>
+            <Text color="gray">│</Text>
+            <Text color="gray">Tokens: {agentState.tokenUsage.total}</Text>
+            <Text color="gray">│</Text>
+            <Text color="gray">Shell: {shellInfo?.shell || 'unknown'}</Text>
           </Box>
         </Box>
       </Box>
@@ -196,7 +198,7 @@ function App({ cli }: AppProps) {
 
       {/* Footer */}
       <Box marginTop={1}>
-        <Text color="gray" dim>
+        <Text color="gray">
           Press &lt;Ctrl+C&gt; to exit  │  Tab to complete  │  ↑↓ for history
         </Text>
       </Box>
