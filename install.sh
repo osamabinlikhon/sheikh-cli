@@ -3,8 +3,10 @@
 set -e
 
 SHEIKH_VERSION="1.0.0"
+REPO_URL="https://github.com/osamabinlikhon/sheikh-cli"
 INSTALL_DIR="$HOME/.sheikh"
 BIN_DIR="$HOME/.local/bin"
+NPM_PACKAGE="sheikh-termux"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,6 +28,17 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --npm          Install via npm (recommended)"
+    echo "  --git          Install from GitHub source"
+    echo "  --update       Update existing installation"
+    echo "  -h, --help     Show this help message"
+    echo ""
 }
 
 check_dependencies() {
@@ -55,17 +68,14 @@ check_termux() {
     fi
 }
 
-install_dependencies() {
-    log_info "Installing dependencies..."
-    
-    if command -v pkg &> /dev/null; then
-        pkg update && pkg upgrade -y
-        pkg install -y git nodejs
-    fi
+install_via_npm() {
+    log_info "Installing sheikh-termux via npm..."
+    npm install -g "$NPM_PACKAGE"
+    log_success "Installed sheikh-termux globally!"
 }
 
-clone_or_download() {
-    log_info "Installing Sheikh CLI v${SHEIKH_VERSION}..."
+install_via_git() {
+    log_info "Installing Sheikh CLI v${SHEIKH_VERSION} from GitHub..."
     
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
@@ -75,14 +85,26 @@ clone_or_download() {
         git pull
     else
         log_info "Cloning repository..."
-        REPO_URL="${REPO_URL:-https://github.com/anomalyco/sheikh-cli}"
         git clone "$REPO_URL" .
     fi
     
     npm install
     
-    if [ -d "dist" ]; then
-        npm run build
+    if [ -f "package.json" ]; then
+        npm run build 2>/dev/null || true
+    fi
+    
+    create_bin_link
+}
+
+update_installation() {
+    if command -v sheikh &> /dev/null; then
+        log_info "Updating sheikh-termux..."
+        npm install -g "$NPM_PACKAGE"
+        log_success "Updated sheikh-termux!"
+    else
+        log_warn "sheikh not found, installing fresh..."
+        install_via_npm
     fi
 }
 
@@ -95,19 +117,14 @@ node "'"$INSTALL_DIR"'/dist/index.js" "$@"' > "$BIN_DIR/sheikh"
         chmod +x "$BIN_DIR/sheikh"
     fi
     
-    if [ -f "$INSTALL_DIR/sheikh.sh" ]; then
-        cp "$INSTALL_DIR/sheikh.sh" "$BIN_DIR/sheikh"
-        chmod +x "$BIN_DIR/sheikh"
-    fi
-    
-    log_success "Installed to $BIN_DIR/sheikh"
+    log_success "Installed to $BIN_DIR/she_bash_completion() {
+    localikh"
 }
 
-setup_bash_completion() {
-    local bashrc="$HOME/.bashrc"
-    local completion_line='eval "$(sheikh --completion bash)"'
+setup bashrc="$HOME/.bashrc"
+    local completion_line='eval "$(sheikh --completion bash 2>/dev/null)"'
     
-    if ! grep -q "sheikh.*completion" "$bashrc" 2>/dev/null; then
+    if [ -f "$bashrc" ] && ! grep -q "sheikh.*completion" "$bashrc" 2>/dev/null; then
         echo "" >> "$bashrc"
         echo "# Sheikh CLI completion" >> "$bashrc"
         echo "$completion_line" >> "$bashrc"
@@ -121,7 +138,6 @@ setup_zsh_completion() {
     
     if [ -f "$zshrc" ] && [ ! -f "$comp_file" ]; then
         mkdir -p "$(dirname "$comp_file")"
-        # Generate completion would go here
         log_info "Zsh completion support added"
     fi
 }
@@ -139,7 +155,7 @@ EOF
             log_info "Added extra keys configuration"
         fi
         
-        if ! grep -q "sheikh" "$HOME/.bashrc" 2>/dev/null; then
+        if ! grep -q "sheikh\|.local/bin" "$HOME/.bashrc" 2>/dev/null; then
             echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
         fi
     fi
@@ -150,9 +166,10 @@ create_uninstall_script() {
 #!/bin/bash
 rm -rf "$INSTALL_DIR"
 rm -f "$BIN_DIR/sheikh"
+npm uninstall -g $NPM_PACKAGE
 echo "Sheikh CLI uninstalled"
 UNINSTALL_EOF
-    chmod +x "$INSTALL_DIR/uninstall.sh"
+    chmod +x "$INSTALL_DIR/uninstall.sh" 2>/dev/null || true
 }
 
 print_summary() {
@@ -166,11 +183,40 @@ print_summary() {
     echo "  sheikh --help            # Show help"
     echo "  sheikh init my-project   # Create new project"
     echo ""
-    echo "Documentation: https://sheikh-cli.dev/docs"
+    echo "GitHub: $REPO_URL"
+    echo "npm: https://npmjs.com/package/$NPM_PACKAGE"
     echo ""
 }
 
 main() {
+    local install_method="npm"
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --npm)
+                install_method="npm"
+                shift
+                ;;
+            --git)
+                install_method="git"
+                shift
+                ;;
+            --update)
+                update_installation
+                exit 0
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    
     echo "=============================================="
     echo "  Sheikh CLI Installer v${SHEIKH_VERSION}"
     echo "=============================================="
@@ -178,12 +224,15 @@ main() {
     
     check_dependencies
     check_termux
-    install_dependencies
-    clone_or_download
-    create_bin_link
+    
+    if [ "$install_method" = "npm" ]; then
+        install_via_npm
+    else
+        install_via_git
+    fi
+    
     setup_bash_completion
     configure_termux
-    create_uninstall_script
     print_summary
 }
 

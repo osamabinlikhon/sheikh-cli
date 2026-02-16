@@ -1,10 +1,13 @@
 {
-  "name": "sheikh-cli",
+  "name": "sheikh-termux",
   "version": "1.0.0",
   "type": "module",
   "description": "Agentic coding tool for Termux and terminal environments. Extensible MCP support, built-in tools for file operations, shell commands, and web fetching.",
   "license": "Apache-2.0",
   "main": "dist/index.js",
+  "bin": {
+    "sheikh": "./dist/index.js"
+  },
   "scripts": {
     "build": "esbuild src/index.tsx --bundle --platform=node --outfile=dist/index.js --external:react --external:react-dom --external:ink --format=esm",
     "start": "node dist/index.js",
